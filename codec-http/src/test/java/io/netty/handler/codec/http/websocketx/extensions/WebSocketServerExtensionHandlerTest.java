@@ -17,22 +17,31 @@ package io.netty.handler.codec.http.websocketx.extensions;
 
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.http.DefaultFullHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpRequest;
+import io.netty.handler.codec.http.DefaultHttpResponse;
+import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpRequest;
 import io.netty.handler.codec.http.HttpResponse;
+import io.netty.handler.codec.http.HttpResponseStatus;
 
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
 
+import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import static io.netty.handler.codec.http.websocketx.extensions.WebSocketExtensionTestUtil.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.*;
 
@@ -282,6 +291,106 @@ public class WebSocketServerExtensionHandlerTest {
         content.release();
 
         assertNull(ch.pipeline().context(extensionHandler));
+        assertTrue(ch.finishAndReleaseAll());
+    }
+
+    @Test
+    public void testPipelineLimit() {
+        testPipelineLimit0(newUpgradeRequest("main2"));
+    }
+
+    @Test
+    public void testPipelineLimitWithFullHttpRequest() {
+        FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/chat");
+        WebSocketExtensionTestUtil.addUpgradeHeaders(req, "main2");
+        testPipelineLimit0(req);
+        assertEquals(0, req.refCnt());
+    }
+
+    private void testPipelineLimit0(final HttpRequest req2) {
+        // initialize
+        when(mainHandshakerMock.handshakeExtension(webSocketExtensionDataMatcher("main")))
+            .thenReturn(mainExtensionMock);
+
+        when(mainExtensionMock.rsv()).thenReturn(WebSocketExtension.RSV1);
+        when(mainExtensionMock.newReponseData()).thenReturn(
+            new WebSocketExtensionData("main", Collections.<String, String>emptyMap()));
+        when(mainExtensionMock.newExtensionEncoder()).thenReturn(new DummyEncoder());
+        when(mainExtensionMock.newExtensionDecoder()).thenReturn(new DummyDecoder());
+
+        when(main2HandshakerMock.handshakeExtension(webSocketExtensionDataMatcher("main2")))
+            .thenReturn(main2ExtensionMock);
+
+        when(main2ExtensionMock.rsv()).thenReturn(WebSocketExtension.RSV1);
+        when(main2ExtensionMock.newReponseData()).thenReturn(
+            new WebSocketExtensionData("main2", Collections.<String, String>emptyMap()));
+        when(main2ExtensionMock.newExtensionEncoder()).thenReturn(new DummyEncoder());
+        when(main2ExtensionMock.newExtensionDecoder()).thenReturn(new DummyDecoder());
+
+        // execute
+        WebSocketServerExtensionHandler extensionHandler =
+            new WebSocketServerExtensionHandler(1, mainHandshakerMock, main2HandshakerMock);
+        final EmbeddedChannel ch = new EmbeddedChannel(extensionHandler);
+
+        HttpRequest req = newUpgradeRequest("main");
+        assertTrue(ch.writeInbound(req));
+        assertTrue(ch.writeInbound(LastHttpContent.EMPTY_LAST_CONTENT));
+
+        assertThrows(IllegalStateException.class, new Executable() {
+            @Override
+            public void execute() {
+                ch.writeInbound(req2);
+            }
+        });
+
+        // Should also close the channel.
+        assertFalse(ch.isActive());
+
+        ch.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testPipelineLimitWithNonUpgradeRequests() {
+        // Plain pipelined (non-upgrade) requests are queued too, so they must be bounded by the default limit.
+        WebSocketServerExtensionHandler extensionHandler = new WebSocketServerExtensionHandler(mainHandshakerMock);
+        final EmbeddedChannel ch = new EmbeddedChannel(extensionHandler);
+
+        for (int i = 0; i < 128; i++) {
+            assertTrue(ch.writeInbound(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/" + i)));
+            assertTrue(ch.writeInbound(LastHttpContent.EMPTY_LAST_CONTENT));
+        }
+        assertTrue(ch.isActive());
+
+        final FullHttpRequest req = new DefaultFullHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/overflow");
+        assertThrows(IllegalStateException.class, new Executable() {
+            @Override
+            public void execute() {
+                ch.writeInbound(req);
+            }
+        });
+
+        assertEquals(0, req.refCnt());
+        assertFalse(ch.isActive());
+
+        ch.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testPipelineLimitAllowsAnsweredRequests() {
+        // Requests that are answered before the next one arrives never exceed the limit.
+        WebSocketServerExtensionHandler extensionHandler =
+            new WebSocketServerExtensionHandler(1, mainHandshakerMock);
+        EmbeddedChannel ch = new EmbeddedChannel(extensionHandler);
+
+        for (int i = 0; i < 4; i++) {
+            assertTrue(ch.writeInbound(new DefaultHttpRequest(HttpVersion.HTTP_1_1, HttpMethod.GET, "/" + i)));
+            assertTrue(ch.writeInbound(LastHttpContent.EMPTY_LAST_CONTENT));
+            assertTrue(ch.writeOutbound(new DefaultHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)));
+            assertTrue(ch.writeOutbound(LastHttpContent.EMPTY_LAST_CONTENT));
+        }
+
+        assertTrue(ch.isActive());
+        assertNotNull(ch.pipeline().context(extensionHandler));
         assertTrue(ch.finishAndReleaseAll());
     }
 }

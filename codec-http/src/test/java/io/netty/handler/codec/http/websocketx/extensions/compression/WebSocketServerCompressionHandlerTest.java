@@ -26,6 +26,7 @@ import io.netty.handler.codec.http.websocketx.extensions.WebSocketServerExtensio
 import java.util.List;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import static io.netty.handler.codec.http.websocketx.extensions.compression.
         PerMessageDeflateServerExtensionHandshaker.*;
@@ -34,6 +35,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class WebSocketServerCompressionHandlerTest {
@@ -196,6 +198,29 @@ public class WebSocketServerCompressionHandlerTest {
         assertTrue(exts.get(0).parameters().isEmpty());
         assertNotNull(ch.pipeline().get(PerMessageDeflateDecoder.class));
         assertNotNull(ch.pipeline().get(PerMessageDeflateEncoder.class));
+    }
+
+    @Test
+    public void testPipelinedCompressionOffersAreBounded() {
+        final EmbeddedChannel ch = new EmbeddedChannel(new WebSocketServerCompressionHandler());
+
+        // Pipelined permessage-deflate offers without any response are accepted up to the default limit (128).
+        for (int i = 0; i < 128; i++) {
+            assertTrue(ch.writeInbound(newUpgradeRequest(PERMESSAGE_DEFLATE_EXTENSION)));
+        }
+        assertTrue(ch.isActive());
+
+        assertThrows(IllegalStateException.class, new Executable() {
+            @Override
+            public void execute() {
+                ch.writeInbound(newUpgradeRequest(PERMESSAGE_DEFLATE_EXTENSION));
+            }
+        });
+
+        // Should also close the channel.
+        assertFalse(ch.isActive());
+
+        ch.finishAndReleaseAll();
     }
 
 }
