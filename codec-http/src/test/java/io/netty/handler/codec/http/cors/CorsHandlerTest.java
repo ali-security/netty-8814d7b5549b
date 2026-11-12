@@ -15,12 +15,14 @@
  */
 package io.netty.handler.codec.http.cors;
 
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultFullHttpResponse;
 import io.netty.handler.codec.http.FullHttpRequest;
+import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpUtil;
@@ -48,6 +50,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.core.IsEqual.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 public class CorsHandlerTest {
 
@@ -528,6 +531,67 @@ public class CorsHandlerTest {
         assertTrue(ReferenceCountUtil.release(response));
     }
 
+    @Test
+    public void varyHeaderIsAppended() {
+        CorsConfig config = forAnyOrigin().allowCredentials().build();
+        EmbeddedChannel channel = new EmbeddedChannel(new CorsHandler(config),
+                new SimpleChannelInboundHandler<Object>() {
+                    @Override
+                    protected void channelRead0(ChannelHandlerContext ctx, Object msg) {
+                        HttpResponse response = new DefaultFullHttpResponse(HTTP_1_1, OK, Unpooled.buffer(0));
+                        response.headers().set(VARY, ACCEPT_ENCODING);
+                        ctx.writeAndFlush(response);
+                    }
+                });
+        FullHttpRequest request = createHttpRequest(GET);
+        request.headers().set(ORIGIN, "http://localhost:7777");
+        assertFalse(channel.writeInbound(request));
+
+        FullHttpResponse response = channel.readOutbound();
+
+        List<String> varyHeaders = response.headers().getAll(VARY);
+        assertThat(varyHeaders, hasItems(ACCEPT_ENCODING.toString(), ORIGIN.toString()));
+
+        response.release();
+        assertFalse(channel.finish());
+    }
+
+    @Test
+    public void varyHeaderIsAppendedForConfiguredOrigin() {
+        final String origin = "http://localhost:8888";
+        final List<String> varyHeaders = varyHeadersFor(forOrigin(origin).build(), origin, ACCEPT_ENCODING);
+        assertThat(varyHeaders, hasItems(ACCEPT_ENCODING.toString(), ORIGIN.toString()));
+        assertEquals(2, varyHeaders.size());
+    }
+
+    @Test
+    public void varyHeaderOriginIsNotDuplicated() {
+        final String origin = "http://localhost:7777";
+        final CorsConfig config = forAnyOrigin().allowCredentials().build();
+
+        assertEquals(Collections.singletonList(ORIGIN.toString()), varyHeadersFor(config, origin, ORIGIN));
+
+        final String combined = "accept-encoding, origin";
+        assertEquals(Collections.singletonList(combined), varyHeadersFor(config, origin, combined));
+    }
+
+    private static List<String> varyHeadersFor(final CorsConfig config,
+                                               final String origin,
+                                               final CharSequence existingVary) {
+        final EmbeddedChannel channel = new EmbeddedChannel(new CorsHandler(config), new VaryHandler(existingVary));
+        final FullHttpRequest request = createHttpRequest(GET);
+        request.headers().set(ORIGIN, origin);
+        assertFalse(channel.writeInbound(request));
+
+        final FullHttpResponse response = channel.readOutbound();
+        assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(origin));
+        final List<String> varyHeaders = response.headers().getAll(VARY);
+
+        assertTrue(response.release());
+        assertFalse(channel.finish());
+        return varyHeaders;
+    }
+
     private static HttpResponse simpleRequest(final CorsConfig config, final String origin) {
         return simpleRequest(config, origin, null);
     }
@@ -595,6 +659,21 @@ public class CorsHandlerTest {
         @Override
         public void channelRead0(ChannelHandlerContext ctx, Object msg) throws Exception {
             ctx.writeAndFlush(new DefaultFullHttpResponse(HTTP_1_1, OK, true, true));
+        }
+    }
+
+    private static final class VaryHandler extends SimpleChannelInboundHandler<Object> {
+        private final CharSequence vary;
+
+        VaryHandler(final CharSequence vary) {
+            this.vary = vary;
+        }
+
+        @Override
+        protected void channelRead0(ChannelHandlerContext ctx, Object msg) {
+            final HttpResponse response = new DefaultFullHttpResponse(HTTP_1_1, OK, Unpooled.buffer(0));
+            response.headers().set(VARY, vary);
+            ctx.writeAndFlush(response);
         }
     }
 
